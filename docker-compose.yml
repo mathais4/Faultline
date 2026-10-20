@@ -1,0 +1,83 @@
+# Faultline as separate containers: every service is its own process with its own network address, and the
+# queue lives in a real PostgreSQL.
+#
+#   docker compose up --build --abort-on-container-exit lab       # all experiments -> ./out/
+#   docker compose run --rm lab run --only payments-outage --trials 1 --out /out --connect gateway=http://gateway:8080,payments=http://payments:8080,inventory=http://inventory:8080,worker=http://worker:8080
+#
+# Single-container variant (services share one JVM, still a real PostgreSQL):
+#   docker compose --profile single run --rm lab-single
+
+x-db: &db
+  FAULTLINE_DB_URL: jdbc:postgresql://postgres:5432/faultline
+  FAULTLINE_DB_USER: faultline
+  FAULTLINE_DB_PASSWORD: faultline
+
+x-svc: &svc
+  build: .
+  restart: "no"
+
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: faultline
+      POSTGRES_USER: faultline
+      POSTGRES_PASSWORD: faultline
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U faultline -d faultline"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  payments:
+    <<: *svc
+    command: ["node", "--role", "payments", "--port", "8080"]
+
+  inventory:
+    <<: *svc
+    command: ["node", "--role", "inventory", "--port", "8080"]
+
+  gateway:
+    <<: *svc
+    command: ["node", "--role", "gateway", "--port", "8080"]
+    environment:
+      <<: *db
+      FAULTLINE_INVENTORY_URL: http://inventory:8080
+      FAULTLINE_PAYMENTS_URL: http://payments:8080
+    depends_on:
+      postgres: {condition: service_healthy}
+      payments: {condition: service_started}
+      inventory: {condition: service_started}
+
+  worker:
+    <<: *svc
+    command: ["node", "--role", "worker", "--port", "8080"]
+    environment:
+      <<: *db
+      FAULTLINE_INVENTORY_URL: http://inventory:8080
+    depends_on:
+      postgres: {condition: service_healthy}
+      inventory: {condition: service_started}
+
+  lab:
+    <<: *svc
+    command: ["run", "--out", "/out",
+              "--connect", "gateway=http://gateway:8080,payments=http://payments:8080,inventory=http://inventory:8080,worker=http://worker:8080"]
+    environment:
+      <<: *db
+    volumes:
+      - ./out:/out
+    depends_on:
+      gateway: {condition: service_started}
+      worker: {condition: service_started}
+
+  lab-single:
+    <<: *svc
+    profiles: ["single"]
+    command: ["run", "--out", "/out"]
+    environment:
+      <<: *db
+    volumes:
+      - ./out:/out
+    depends_on:
+      postgres: {condition: service_healthy}
